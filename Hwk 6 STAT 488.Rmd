@@ -1,0 +1,185 @@
+---
+title: "Homework 6 STAT 488"
+author: "Brandon Ristoff"
+date: "04/13/2020"
+output: html_document
+---
+
+```{r}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Describing the Data
+
+```{r}
+library(readr)
+library(janitor)
+library(mvtnorm)
+library(MASS)
+library(dplyr)
+library(corrplot)
+library(readxl)
+library(lubridate)
+library(reshape2)
+
+school <- read_csv("ill_school_data.csv")
+str(school)
+school2 <- school
+
+rowSums(is.na(school))
+sum(rowSums(is.na(school))>50)
+colSums(is.na(school))
+
+```
+
+It appears that this data set consists of 500 high school students who live in Illinois and their physical traits (i.e. gender, height, arm length, etc.), aspects of their health (i.e. sleep hours, allergies) as well as personal preferences (i.e. favorite music and super power choice).
+
+Also this data set is not completely cleaned up. Some entries don't make sense. For example, so people say they are 1.8 centimeters tall, which probably is a typo.
+
+
+## Handedness Test
+```{r}
+school2$Handed <- as.factor(school2$Handed)
+summary(school2$Handed)
+
+school2$Favorite_Season <- as.factor(school2$Favorite_Season)
+summary(school2$Favorite_Season)
+
+partb <- data.frame(school2$Handed,school2$Favorite_Season)
+dat <- partb[complete.cases(partb),]
+colnames(dat) <- c("x","y")
+table(dat)
+
+XsqObs <- chisq.test(table(dat), simulate.p.value = TRUE)$statistic
+
+library(gtools)
+set.seed(42)
+n <- length(dat$y)
+nsim <- 1000
+XsqPerms <- rep(NA, nsim)
+for (i in 1:nsim) {
+  datTemp <- dat
+  datTemp$y <- datTemp$y[sample(1:n,n)]
+  XsqPerms[i] <- chisq.test(table(datTemp), simulate.p.value = TRUE)$statistic
+}
+
+XsqObs
+
+table(round(XsqPerms,2))
+sum(XsqPerms>=XsqObs)/nsim #p-value
+```
+
+It was probably fine in this circumstance, since only about 10% of the observations had at least one NA. I chose a permutation test because this is dealing with two categorical variables and not dealing with continuity. 
+
+Doing a permutation test, with a p-value of 0.714, we fail to reject the null hypothesis of this test (with an alpha of 0.05), that handedness did not affect someone's favorite season. (The alternative hypothesis was that they did have an effect.) Therefore we fail to prove a significant association between the two.
+
+## Cleaning Data and Simple Linear Regresion with CART and Random Forest
+
+```{r}
+library(mice)
+library(VIM)
+library(lattice)
+
+#Dependent: height Exposure: Arm Length
+#Variables that might help: Gender, ageyears, foot_length_cm
+partc <- school2[,5:10]
+partc <- partc[,-3]
+
+aggr(partc)
+str(partc)
+library(stringr)
+
+colSums(is.na(partc))
+
+numextract <- function(string){ 
+  str_extract(string, "\\-*\\d+\\.*\\d*")
+}
+
+partc$Gender <- as.factor(partc$Gender)
+partc$Height_cm <- as.numeric(numextract(partc$Height_cm))
+partc$Footlength_cm <- as.numeric(numextract(partc$Footlength_cm))
+partc$Armspan_cm <- as.numeric(numextract(partc$Armspan_cm))
+
+colSums(is.na(partc))
+
+#Because some people put their height in inches instead of centimeters, those must be removed.
+summary(partc)
+
+partc$Ageyears[partc$Ageyears > 20] <- NA
+partc$Height_cm[partc$Height_cm < 120] <- NA
+partc$Height_cm[partc$Height_cm > 200] <- NA
+partc$Footlength_cm[partc$Footlength_cm < 20] <- NA
+partc$Footlength_cm[partc$Footlength_cm > 36] <- NA
+partc$Armspan_cm[partc$Armspan_cm < 110] <- NA
+partc$Armspan_cm[partc$Armspan_cm > 205] <- NA
+
+colSums(is.na(partc))
+
+# CART Model
+library(norm)
+imp_cart <- mice(partc, m=5, method='cart',seed=37, printFlag=FALSE)
+impDatList_cart <- list()
+
+impDatList_cart[[1]]<-complete(imp_cart,1)
+impDatList_cart[[2]]<-complete(imp_cart,2)
+impDatList_cart[[3]]<-complete(imp_cart,3)
+impDatList_cart[[4]]<-complete(imp_cart,4)
+impDatList_cart[[5]]<-complete(imp_cart,5)
+
+summary(lm(Height_cm~Armspan_cm,data=as.data.frame(impDatList_cart[[1]])))
+summary(lm(Height_cm~Armspan_cm,data=as.data.frame(impDatList_cart[[2]])))
+summary(lm(Height_cm~Armspan_cm,data=as.data.frame(impDatList_cart[[3]])))
+summary(lm(Height_cm~Armspan_cm,data=as.data.frame(impDatList_cart[[4]])))
+summary(lm(Height_cm~Armspan_cm,data=as.data.frame(impDatList_cart[[5]])))
+
+betaList_cart<-seList_cart<-list()
+for (i in 1:5){
+betaList_cart[[i]]<-summary(lm(Height_cm~Armspan_cm,data=as.data.frame(impDatList_cart[[i]])))$coefficients[,1]
+seList_cart[[i]]<-summary(lm(Height_cm~Armspan_cm,data=as.data.frame(impDatList_cart[[i]])))$coefficients[,2]
+}
+
+mi.inference(betaList_cart,seList_cart)$est
+mi.inference(betaList_cart,seList_cart)$std.err
+mi.inference(betaList_cart,seList_cart)$signif
+
+```
+
+For the CART model, it is determined that for ever on centimeter increase in armspan, the estimated height of of the person in centimeters goes up 0.6152 centimeters. The estimated standard error is 0.0259 and with a p-value of 0, armspan is statistically significant. 
+
+## Random Forest
+
+```{r}
+imp_rf <- mice(partc, m=5, method='rf',seed=85, printFlag=FALSE)
+
+impDatList_rf <- list()
+impDatList_rf[[1]]<-complete(imp_rf,1)
+impDatList_rf[[2]]<-complete(imp_rf,2)
+impDatList_rf[[3]]<-complete(imp_rf,3)
+impDatList_rf[[4]]<-complete(imp_rf,4)
+impDatList_rf[[5]]<-complete(imp_rf,5)
+
+summary(lm(Height_cm~Armspan_cm,data=as.data.frame(impDatList_rf[[1]])))
+summary(lm(Height_cm~Armspan_cm,data=as.data.frame(impDatList_rf[[2]])))
+summary(lm(Height_cm~Armspan_cm,data=as.data.frame(impDatList_rf[[3]])))
+summary(lm(Height_cm~Armspan_cm,data=as.data.frame(impDatList_rf[[4]])))
+summary(lm(Height_cm~Armspan_cm,data=as.data.frame(impDatList_rf[[5]])))
+
+betaList_rf<-seList_rf<-list()
+for (i in 1:5){
+betaList_rf[[i]]<-summary(lm(Height_cm~Armspan_cm,data=as.data.frame(impDatList_rf[[i]])))$coefficients[,1]
+seList_rf[[i]]<-summary(lm(Height_cm~Armspan_cm,data=as.data.frame(impDatList_rf[[i]])))$coefficients[,2]
+}
+
+mi.inference(betaList_rf,seList_rf)$est
+mi.inference(betaList_rf,seList_rf)$std.err
+mi.inference(betaList_rf,seList_rf)$signif
+
+```
+
+For the Random Forest model, it is determined that for ever on centimeter increase in armspan, the estimated height of of the person in centimeters goes up 0.5266 centimeters. The estimated standard error is 0.03336 and with a p-value of 3.462786e-12, armspan is statistically significant in this model. 
+
+## Github Link
+
+Find my assignment at: https://github.com/bcristoff78/homework
+
+
